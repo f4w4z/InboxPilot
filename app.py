@@ -29,8 +29,10 @@ def root():
     return {"status": "ok", "env": "InboxPilot"}
 
 @app.post("/reset", response_model=Observation)
-def reset_env(req: ResetRequest):
+def reset_env(req: Optional[ResetRequest] = None):
     try:
+        if req is None:
+            req = ResetRequest(task_id="easy", instance_id="default")
         env = InboxPilotEnv(task_id=req.task_id)
         envs[req.instance_id] = env
         return env.reset()
