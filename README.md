@@ -1,3 +1,12 @@
+---
+title: InboxPilot
+emoji: 📬
+colorFrom: blue
+colorTo: purple
+sdk: docker
+pinned: false
+---
+
 # InboxPilot
 
 InboxPilot is a real-world OpenEnv-compatible AI environment for email triage. The environment simulates a human inbox workflow where an AI agent must classify incoming emails, prioritize them, draft safe and useful replies, and avoid incorrect actions.
