@@ -1,0 +1,59 @@
+name: "InboxPilot"
+version: "1.0.0"
+description: "A real-world email triage environment simulating a human inbox workflow."
+
+tasks:
+  - id: "easy"
+    description: "Classify a single email as spam or not_spam."
+  - id: "medium"
+    description: "Classify an email and draft a reply."
+  - id: "hard"
+    description: "Multi-email inbox requiring sequential triage, prioritization, and drafting replies."
+
+observation_space:
+  type: "dict"
+  schema:
+    current_email:
+      type: "dict"
+      description: "Details of the current top email in the inbox (id, sender, subject, body)."
+    inbox_summary:
+      type: "string"
+      description: "Summary of remaining emails."
+    previous_actions:
+      type: "list[string]"
+      description: "History of actions taken in the current episode."
+    task_name:
+      type: "string"
+      description: "Name of the current task."
+    step_count:
+      type: "integer"
+      description: "Number of steps taken in the current episode."
+
+action_space:
+  type: "dict"
+  schema:
+    action_type:
+      type: "categorical"
+      choices: ["classify", "prioritize", "reply", "finish"]
+    email_id:
+      type: "string"
+      description: "Target email ID for the action."
+    label:
+      type: "string"
+      optional: true
+      description: "Classification label if action is classify."
+    priority:
+      type: "string"
+      optional: true
+      description: "Priority level if action is prioritize."
+    reply_text:
+      type: "string"
+      optional: true
+      description: "Draft text if action is reply."
+
+api:
+  endpoints:
+    GET /: "Health check"
+    POST /reset: "Resets the environment and returns Observation"
+    POST /step: "Takes an Action and returns StepResponse containing Observation, StepReward, is_done, and info"
+    GET /state: "Returns the detailed EnvironmentState"
