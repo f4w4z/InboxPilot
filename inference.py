@@ -26,12 +26,10 @@ def _ensure_server_running(base_url: str, timeout: float = 15.0):
     try:
         r = requests.get(f"{base_url}/", timeout=2)
         if r.status_code == 200:
-            print("[inference] Environment server already reachable.")
             return
     except Exception:
         pass  # not running yet – we'll start it
 
-    print("[inference] Starting environment server in background thread …")
     port = int(base_url.rsplit(":", 1)[-1].split("/")[0])
     t = threading.Thread(target=_start_env_server, args=("0.0.0.0", port), daemon=True)
     t.start()
@@ -42,7 +40,6 @@ def _ensure_server_running(base_url: str, timeout: float = 15.0):
         try:
             r = requests.get(f"{base_url}/", timeout=1)
             if r.status_code == 200:
-                print("[inference] Environment server is ready.")
                 return
         except Exception:
             pass
@@ -53,17 +50,25 @@ def _ensure_server_running(base_url: str, timeout: float = 15.0):
 
 
 # ---------------------------------------------------------------------------
-# 2. Configuration
+# 2. Configuration  (matches hackathon checklist exactly)
 # ---------------------------------------------------------------------------
-env_url = os.environ.get("ENV_URL", "http://localhost:8000")
+#   - API_BASE_URL and MODEL_NAME have defaults
+#   - HF_TOKEN does NOT have a default
+API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-oss-120b")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
-openai_base_url = os.environ.get("API_BASE_URL", "https://openrouter.ai/api/v1")
-openai_api_key = os.environ.get(
-    "OPENROUTER_API_KEY", os.environ.get("OPENAI_API_KEY", "dummy")
+# Optional – if you use from_docker_image():
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+
+# Environment server URL (local FastAPI)
+ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
+
+# OpenAI-compatible client configured via the env-var trio
+client = OpenAI(
+    base_url=API_BASE_URL,
+    api_key=HF_TOKEN or "dummy",
 )
-model_name = os.environ.get("MODEL_NAME", "gpt-oss-120b")
-
-client = OpenAI(base_url=openai_base_url, api_key=openai_api_key)
 
 # ---------------------------------------------------------------------------
 # 3. Helpers
@@ -176,32 +181,37 @@ def get_fallback_action(task_id, obs):
 
 
 # ---------------------------------------------------------------------------
-# 4. Agent loop
+# 4. Agent loop  (with structured START / STEP / END logging)
 # ---------------------------------------------------------------------------
 
 def run_agent(task_id="easy"):
-    print(f"Starting task: {task_id}")
+    # ---- START structured log ----
+    print(f"START task_id={task_id}")
 
     # ---- Reset Environment ------------------------------------------------
     try:
         res = requests.post(
-            f"{env_url}/reset",
+            f"{ENV_URL}/reset",
             json={"task_id": task_id, "instance_id": "agent-1"},
             timeout=30,
         )
         res.raise_for_status()
         obs = res.json()
     except requests.exceptions.ConnectionError as e:
-        print(f"[ERROR] Cannot connect to environment at {env_url}: {e}")
+        print(f"STEP 0 error='Cannot connect to environment at {ENV_URL}: {e}'")
+        print(f"END task_id={task_id} reward=0.00")
         return 0.0
-    except requests.exceptions.HTTPError as e:
-        print(f"[ERROR] API Error ({res.status_code}): {res.text}")
+    except requests.exceptions.HTTPError:
+        print(f"STEP 0 error='API Error ({res.status_code}): {res.text}'")
+        print(f"END task_id={task_id} reward=0.00")
         return 0.0
     except requests.exceptions.JSONDecodeError:
-        print(f"[ERROR] Invalid API response: {res.text}")
+        print(f"STEP 0 error='Invalid API response: {res.text}'")
+        print(f"END task_id={task_id} reward=0.00")
         return 0.0
     except Exception as e:
-        print(f"[ERROR] Unexpected error during /reset: {e}")
+        print(f"STEP 0 error='Unexpected error during /reset: {e}'")
+        print(f"END task_id={task_id} reward=0.00")
         return 0.0
 
     is_done = False
@@ -210,7 +220,6 @@ def run_agent(task_id="easy"):
 
     while not is_done and step_count < 20:
         step_count += 1
-        print(f"\n--- Step {step_count} ---")
 
         system_prompt = (
             "You are an AI Email agent. Your task is to process the inbox.\n"
@@ -236,7 +245,7 @@ def run_agent(task_id="easy"):
         for attempt in range(2):
             try:
                 response = client.chat.completions.create(
-                    model=model_name,
+                    model=MODEL_NAME,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {
@@ -249,7 +258,6 @@ def run_agent(task_id="easy"):
 
                 content = response.choices[0].message.content
                 if not content:
-                    print(f"Attempt {attempt+1}: LLM returned empty content.")
                     continue
 
                 # Clean markdown formatting if present
@@ -273,35 +281,32 @@ def run_agent(task_id="easy"):
                 if is_valid:
                     action_json = action_candidate
                     break
-                else:
-                    print(f"Attempt {attempt+1}: Invalid action - {error_msg}")
-                    print(f"Content was: {content}")
 
-            except Exception as e:
-                print(f"Attempt {attempt+1}: LLM call failed: {e}")
+            except Exception:
+                pass  # will retry or fall through to fallback
 
         if not action_json:
-            print("Using deterministic fallback planning based on observation.")
             action_json = get_fallback_action(task_id, obs)
 
-        print(f"Agent decided: {action_json}")
+        # ---- STEP structured log ----
+        print(f"STEP {step_count} action={json.dumps(action_json)}")
 
         # ---- Step Environment ---------------------------------------------
         try:
             res = requests.post(
-                f"{env_url}/step",
+                f"{ENV_URL}/step",
                 json={"instance_id": "agent-1", "action": action_json},
                 timeout=30,
             )
             res.raise_for_status()
             step_res = res.json()
         except Exception as e:
-            print(f"[ERROR] /step request failed: {e}")
+            print(f"STEP {step_count} error='/step request failed: {e}'")
             break
 
         # Handle error responses from environment
         if "observation" not in step_res:
-            print(f"Environment error: {step_res}")
+            print(f"STEP {step_count} error='Environment error: {step_res}'")
             break
 
         obs = step_res["observation"]
@@ -309,14 +314,9 @@ def run_agent(task_id="easy"):
         is_done = step_res["is_done"]
 
         total_reward += reward["reward"]
-        print(
-            f"Reward: {reward['reward']}, "
-            f"Progress: {reward['progress_score']}, "
-            f"Explanation: {reward['explanation']}"
-        )
 
-    print(f"\nTask {task_id} completed in {step_count} steps.")
-    print(f"  Total Reward: {total_reward:.2f}")
+    # ---- END structured log ----
+    print(f"END task_id={task_id} reward={total_reward:.2f}")
     return total_reward
 
 
@@ -326,39 +326,22 @@ def run_agent(task_id="easy"):
 
 if __name__ == "__main__":
     # Ensure the env server is running before we start evaluation
-    _ensure_server_running(env_url)
+    _ensure_server_running(ENV_URL)
 
     tasks = ["easy", "medium", "hard"]
     scores = {}
 
-    print(f"--- Starting InboxPilot Evaluation ---")
-    print(f"Model: {model_name}")
-    print(f"API Base URL: {openai_base_url}\n")
-
     for t in tasks:
-        print(f"{'='*40}")
-        print(f"EVALUATING TASK: {t.upper()}")
-        print(f"{'='*40}")
         score = run_agent(t)
         scores[t] = score
-        print("\n")
 
-    print(f"{'='*40}")
-    print("FINAL EVALUATION RESULTS")
-    print(f"{'='*40}")
-
-    # Normalize scores to 0.0-1.0 scale for cleaner presentation
+    # Normalize scores to 0.0-1.0 scale
     max_scores = {"easy": 1.0, "medium": 2.0, "hard": 3.0}
     normalized_scores = {}
 
     for t in tasks:
         normalized = scores[t] / max_scores[t]
         normalized_scores[t] = max(0.0, min(1.0, normalized))
-        print(f"Task: {t.upper()}")
-        print(f"  Raw Score: {scores[t]:.2f}")
-        print(f"  Normalized: {normalized_scores[t]:.2f} (0.0 - 1.0)")
 
     overall = sum(normalized_scores.values()) / len(tasks)
-    print(f"\n{'='*40}")
-    print(f"OVERALL SCORE: {overall:.2f} / 1.00")
-    print(f"{'='*40}")
+    print(f"OVERALL_SCORE={overall:.2f}")
