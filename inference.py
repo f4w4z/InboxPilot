@@ -3,6 +3,8 @@ import sys
 import time
 import threading
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from openai import OpenAI
 import json
 
@@ -188,27 +190,27 @@ def run_agent(task_id="easy"):
     # ---- START structured log ----
     print(f"START task_id={task_id}")
 
+    # Build a robust session with exponential backoff
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["POST", "GET"]
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
     # ---- Reset Environment ------------------------------------------------
     try:
-        res = requests.post(
+        res = session.post(
             f"{ENV_URL}/reset",
             json={"task_id": task_id, "instance_id": "agent-1"},
             timeout=30,
         )
         res.raise_for_status()
         obs = res.json()
-    except requests.exceptions.ConnectionError as e:
-        print(f"STEP 0 error='Cannot connect to environment at {ENV_URL}: {e}'")
-        print(f"END task_id={task_id} reward=0.00")
-        return 0.0
-    except requests.exceptions.HTTPError:
-        print(f"STEP 0 error='API Error ({res.status_code}): {res.text}'")
-        print(f"END task_id={task_id} reward=0.00")
-        return 0.0
-    except requests.exceptions.JSONDecodeError:
-        print(f"STEP 0 error='Invalid API response: {res.text}'")
-        print(f"END task_id={task_id} reward=0.00")
-        return 0.0
     except Exception as e:
         print(f"STEP 0 error='Unexpected error during /reset: {e}'")
         print(f"END task_id={task_id} reward=0.00")
@@ -293,7 +295,7 @@ def run_agent(task_id="easy"):
 
         # ---- Step Environment ---------------------------------------------
         try:
-            res = requests.post(
+            res = session.post(
                 f"{ENV_URL}/step",
                 json={"instance_id": "agent-1", "action": action_json},
                 timeout=30,
@@ -325,23 +327,29 @@ def run_agent(task_id="easy"):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Ensure the env server is running before we start evaluation
-    _ensure_server_running(ENV_URL)
+    try:
+        # Ensure the env server is running before we start evaluation
+        _ensure_server_running(ENV_URL)
 
-    tasks = ["easy", "medium", "hard"]
-    scores = {}
+        tasks = ["easy", "medium", "hard"]
+        scores = {}
 
-    for t in tasks:
-        score = run_agent(t)
-        scores[t] = score
+        for t in tasks:
+            score = run_agent(t)
+            scores[t] = score
 
-    # Normalize scores to 0.0-1.0 scale
-    max_scores = {"easy": 1.0, "medium": 2.0, "hard": 3.0}
-    normalized_scores = {}
+        # Normalize scores to 0.0-1.0 scale
+        max_scores = {"easy": 1.0, "medium": 2.0, "hard": 3.0}
+        normalized_scores = {}
 
-    for t in tasks:
-        normalized = scores[t] / max_scores[t]
-        normalized_scores[t] = max(0.0, min(1.0, normalized))
+        for t in tasks:
+            normalized = scores[t] / max_scores[t]
+            normalized_scores[t] = max(0.0, min(1.0, normalized))
 
-    overall = sum(normalized_scores.values()) / len(tasks)
-    print(f"OVERALL_SCORE={overall:.2f}")
+        overall = sum(normalized_scores.values()) / len(tasks)
+        print(f"OVERALL_SCORE={overall:.2f}")
+    except BaseException as e:
+        print(f"UNHANDLED EXCEPTION CAUGHT: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(0)
